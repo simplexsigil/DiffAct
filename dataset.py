@@ -7,10 +7,19 @@ from torch.utils.data import Dataset
 from scipy.interpolate import interp1d
 from utils import get_labels_start_end_time
 from scipy.ndimage import gaussian_filter1d
+from data_utils import load_feature, load_temporal_labels, convert_segments_to_segmentations, subsample, get_fps, excluded_samples
 
 def get_data_dict(feature_dir, label_dir, video_list, event_list, sample_rate=4, temporal_aug=True, boundary_smooth=None):
     
     assert(sample_rate > 0)
+    
+    print(f'Loading Dataset ...')
+    
+    # Load temporal labels once - label_dir should be the CSV file path for omnifall
+    gts_segments = load_temporal_labels(label_dir)
+    
+    # Filter out excluded samples
+    video_list = [v for v in video_list if v not in excluded_samples]
         
     data_dict = {k:{
         'feature': None,
@@ -21,34 +30,40 @@ def get_data_dict(feature_dir, label_dir, video_list, event_list, sample_rate=4,
         } for k in video_list
     }
     
-    print(f'Loading Dataset ...')
-    
     for video in tqdm(video_list):
         
-        feature_file = os.path.join(feature_dir, '{}.npy'.format(video))
-        event_file = os.path.join(label_dir, '{}.txt'.format(video))
-
-        event = np.loadtxt(event_file, dtype=str)
-        frame_num = len(event)
-                
-        event_seq_raw = np.zeros((frame_num,))
-        for i in range(frame_num):
-            if event[i] in event_list:
-                event_seq_raw[i] = event_list.index(event[i])
-            else:
-                event_seq_raw[i] = -100  # background
-
-        boundary_seq_raw = get_boundary_seq(event_seq_raw, boundary_smooth)
-
-        feature = np.load(feature_file, allow_pickle=True)
+        # Construct H5 feature path
+        tmp = video.split('/')
+        feature_path = '/'.join([tmp[0], 'features', 'i3d'] + tmp[1:]) + '.h5'
+        feature_file = os.path.join(feature_dir, feature_path)
         
-        if len(feature.shape) == 3:
-            feature = np.swapaxes(feature, 0, 1)  
-        elif len(feature.shape) == 2:
-            feature = np.swapaxes(feature, 0, 1)
-            feature = np.expand_dims(feature, 0)
+        try:
+            feature = load_feature(feature_file)
+        except:
+            print(f"Error loading feature file: {feature_file}")
+            continue
+            
+        # Get FPS and subsample to target FPS (10 fps like MS-TCN2)
+        fps = get_fps(video)
+        target_fps = 10  # Target 10fps like MS-TCN2
+        feature = subsample(feature, original_fps=fps, target_fps=target_fps)
+        
+        # Get temporal segments and convert to frame-wise labels
+        frame_num = feature.shape[0]
+        gt_segments = gts_segments[video]
+        event_seq_raw = convert_segments_to_segmentations(gt_segments, frame_num, fps=target_fps, default_class_id=9)
+        
+        # Convert to float array
+        event_seq_raw = event_seq_raw.astype(np.float32)
+        
+        boundary_seq_raw = get_boundary_seq(event_seq_raw, boundary_smooth)
+        
+        # Handle feature shape - DiffAct expects [spatial_aug, T, F] for temporal augmentation
+        # OmniFall H5 features are [T, F], so we need to add spatial dimension
+        if len(feature.shape) == 2:
+            feature = np.expand_dims(feature, 0)  # Add spatial dimension -> [1, T, F]
         else:
-            raise Exception('Invalid Feature.')
+            raise Exception('Invalid Feature shape: {}'.format(feature.shape))
                     
         assert(feature.shape[1] == event_seq_raw.shape[0])
         assert(feature.shape[1] == boundary_seq_raw.shape[0])
@@ -56,7 +71,7 @@ def get_data_dict(feature_dir, label_dir, video_list, event_list, sample_rate=4,
         if temporal_aug:
             
             feature = [
-                feature[:,offset::sample_rate,:]
+                feature[:, offset::sample_rate, :]
                 for offset in range(sample_rate)
             ]
             
@@ -71,7 +86,7 @@ def get_data_dict(feature_dir, label_dir, video_list, event_list, sample_rate=4,
             ]
                         
         else:
-            feature = [feature[:,::sample_rate,:]]  
+            feature = [feature[:, ::sample_rate, :]]  
             event_seq_ext = [event_seq_raw[::sample_rate]]
             boundary_seq_ext = [boundary_seq_raw[::sample_rate]]
 
@@ -89,9 +104,12 @@ def get_boundary_seq(event_seq, boundary_smooth=None):
 
     _, start_times, end_times = get_labels_start_end_time([str(int(i)) for i in event_seq])
     boundaries = start_times[1:]
-    assert min(boundaries) > 0
-    boundary_seq[boundaries] = 1
-    boundary_seq[[i-1 for i in boundaries]] = 1
+    
+    # Handle case where there are no boundaries (single action video)
+    if len(boundaries) > 0:
+        assert min(boundaries) > 0
+        boundary_seq[boundaries] = 1
+        boundary_seq[[i-1 for i in boundaries]] = 1
 
     if boundary_smooth is not None:
         boundary_seq = gaussian_filter1d(boundary_seq, boundary_smooth)
@@ -102,7 +120,11 @@ def get_boundary_seq(event_seq, boundary_smooth=None):
         temp_seq[temp_seq.shape[0] // 2 - 1] = 1
         norm_z = gaussian_filter1d(temp_seq, boundary_smooth).max()
         boundary_seq[boundary_seq > norm_z] = norm_z
-        boundary_seq /= boundary_seq.max()
+        
+        # Avoid division by zero for videos without boundaries
+        max_val = boundary_seq.max()
+        if max_val > 0:
+            boundary_seq /= max_val
 
     return boundary_seq
 
@@ -174,7 +196,10 @@ class VideoFeatureDataset(Dataset):
             feature = feature.T   # F x T
 
             boundary = boundary.unsqueeze(0)
-            boundary /= boundary.max()  # normalize again
+            # Avoid division by zero for videos without boundaries
+            max_val = boundary.max()
+            if max_val > 0:
+                boundary /= max_val
             
         if self.mode == 'test':
 

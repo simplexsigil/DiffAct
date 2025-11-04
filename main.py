@@ -73,13 +73,14 @@ class Trainer:
                 os.makedirs(result_dir)
             logger = SummaryWriter(result_dir)
         
-        for epoch in range(restore_epoch+1, num_epochs):
+        epoch_pbar = tqdm(range(restore_epoch+1, num_epochs), desc="Training Progress")
+        for epoch in epoch_pbar:
 
             self.model.train()
             
             epoch_running_loss = 0
             
-            for _, data in enumerate(train_train_loader):
+            for _, data in enumerate(tqdm(train_train_loader, desc=f'Epoch {epoch}')):
 
                 feature, label, boundary, video = data
                 feature, label, boundary = feature.to(device), label.to(device), boundary.to(device)
@@ -126,7 +127,14 @@ class Trainer:
                 
             epoch_running_loss /= len(train_train_dataset)
 
-            print(f'Epoch {epoch} - Running Loss {epoch_running_loss}')
+            # Update epoch progress bar with basic info
+            epoch_pbar.set_postfix({
+                'Loss': f'{epoch_running_loss:.4f}',
+                'Step': step
+            })
+            
+            # Print epoch summary
+            print(f'Epoch {epoch} - Training Loss: {epoch_running_loss:.4f}')
         
             if result_dir:
 
@@ -158,8 +166,33 @@ class Trainer:
                         np.save(os.path.join(result_dir, 
                             f'test_results_{mode}_epoch{epoch}.npy'), test_result_dict)
 
-                    for k,v in test_result_dict.items():
-                        print(f'Epoch {epoch} - {mode}-Test-{k} {v}')
+                    # Print test results per subset like MS-TCN2
+                    print(f'\n=== Epoch {epoch} Test Results ===')
+                    print(f"{'Dataset':<12} {'F1@10':<6} {'F1@25':<6} {'F1@50':<6} {'Edit':<6} {'Acc':<6} {'Videos':<6}")
+                    print('-' * 60)
+                    
+                    # Access subset_results from the test method (need to modify return)
+                    for subset_name, metrics in getattr(self, '_last_subset_results', {}).items():
+                        if subset_name in ['all', 'OOPS']:
+                            continue
+                        print(f"{subset_name:<12} {metrics['F1@10']:<6.2f} {metrics['F1@25']:<6.2f} "
+                              f"{metrics['F1@50']:<6.2f} {metrics['Edit']:<6.2f} {metrics['Acc']:<6.2f} {metrics['num_videos']:<6}")
+                    
+                    # Overall results (excluding OOPS)
+                    if 'all' in getattr(self, '_last_subset_results', {}):
+                        all_metrics = self._last_subset_results['all']
+                        print('-' * 60)
+                        print(f"{'Overall':<12} {all_metrics['F1@10']:<6.2f} {all_metrics['F1@25']:<6.2f} "
+                              f"{all_metrics['F1@50']:<6.2f} {all_metrics['Edit']:<6.2f} {all_metrics['Acc']:<6.2f} {all_metrics['num_videos']:<6}")
+                    
+                    # OOPS-Fall results separately
+                    if 'OOPS' in getattr(self, '_last_subset_results', {}):
+                        oops_metrics = self._last_subset_results['OOPS']
+                        print('-' * 60)
+                        print(f"{'OOPS-Fall':<12} {oops_metrics['F1@10']:<6.2f} {oops_metrics['F1@25']:<6.2f} "
+                              f"{oops_metrics['F1@50']:<6.2f} {oops_metrics['Edit']:<6.2f} {oops_metrics['Acc']:<6.2f} {oops_metrics['num_videos']:<6}")
+                    
+                    print('=' * 60)
 
 
                     if log_train_results:
@@ -175,8 +208,14 @@ class Trainer:
                             np.save(os.path.join(result_dir, 
                                 f'train_results_{mode}_epoch{epoch}.npy'), train_result_dict)
                             
-                        for k,v in train_result_dict.items():
-                            print(f'Epoch {epoch} - {mode}-Train-{k} {v}')
+                        # Print train results clearly
+                        print(f'\n=== Epoch {epoch} Train Results ===')
+                        print(f'Accuracy: {train_result_dict.get("Acc", 0):.2f}%')
+                        print(f'Edit Score: {train_result_dict.get("Edit", 0):.2f}')
+                        print(f'F1@10: {train_result_dict.get("F1@10", 0):.2f}%')
+                        print(f'F1@25: {train_result_dict.get("F1@25", 0):.2f}%')
+                        print(f'F1@50: {train_result_dict.get("F1@50", 0):.2f}%')
+                        print('=' * 35)
                         
         if result_dir:
             logger.close()
@@ -193,7 +232,13 @@ class Trainer:
         self.model.to(device)
 
         if model_path:
-            self.model.load_state_dict(torch.load(model_path))
+            checkpoint = torch.load(model_path)
+            if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                # Loading from checkpoint file (latest.pt)
+                self.model.load_state_dict(checkpoint['model'])
+            else:
+                # Loading from epoch model file (epoch-X.model)
+                self.model.load_state_dict(checkpoint)
 
         if self.set_sampling_seed:
             seed = video_idx
@@ -285,7 +330,13 @@ class Trainer:
         self.model.to(device)
 
         if model_path:
-            self.model.load_state_dict(torch.load(model_path))
+            checkpoint = torch.load(model_path)
+            if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                # Loading from checkpoint file (latest.pt)
+                self.model.load_state_dict(checkpoint['model'])
+            else:
+                # Loading from epoch model file (epoch-X.model)
+                self.model.load_state_dict(checkpoint)
         
         with torch.no_grad():
 
@@ -296,25 +347,88 @@ class Trainer:
 
                 pred = [self.event_list[int(i)] for i in pred]
                 
-                if not os.path.exists(os.path.join(result_dir, 'prediction')):
-                    os.makedirs(os.path.join(result_dir, 'prediction'))
-
                 file_name = os.path.join(result_dir, 'prediction', f'{video}.txt')
+                
+                # Create all necessary subdirectories
+                os.makedirs(os.path.dirname(file_name), exist_ok=True)
+                
                 file_ptr = open(file_name, 'w')
                 file_ptr.write('### Frame level recognition: ###\n')
                 file_ptr.write(' '.join(pred))
                 file_ptr.close()
 
-        acc, edit, f1s = func_eval(
-            label_dir, os.path.join(result_dir, 'prediction'), test_dataset.video_list)
+        # Create ground truth directory for omnifall evaluation
+        # Detect omnifall by checking if label_dir is a CSV file
+        if label_dir.endswith('.csv'):
+            gt_dir = os.path.join(result_dir, 'ground_truth')
+            os.makedirs(gt_dir, exist_ok=True)
+            
+            # Create ground truth TXT files from the dataset
+            for video_idx in range(len(test_dataset)):
+                video = test_dataset.video_list[video_idx]
+                # Get ground truth labels from dataset
+                if test_dataset.mode == 'test':
+                    gt_labels = test_dataset.data_dict[video]['event_seq_raw']
+                    gt_labels = gt_labels.cpu().numpy().astype(int)
+                    
+                    # Convert to string labels
+                    gt_strings = [self.event_list[int(label)] for label in gt_labels]
+                    
+                    # Save to TXT file
+                    gt_file = os.path.join(gt_dir, f'{video}.txt')
+                    os.makedirs(os.path.dirname(gt_file), exist_ok=True)
+                    with open(gt_file, 'w') as f:
+                        f.write('\n'.join(gt_strings) + '\n')
+            
+            eval_label_dir = gt_dir
+        else:
+            eval_label_dir = label_dir
+            
+        # Evaluate overall and per-subset like MS-TCN2
+        test_subsets = [
+            "all",
+            "caucafall", 
+            "cmdfall",
+            "edf", 
+            "gmdcsa24",
+            "le2i",
+            "mcfd",
+            "occu", 
+            "up_fall",
+            "OOPS",
+        ]
+        
+        subset_results = {}
+        
+        for subset in test_subsets:
+            if subset == "all":
+                # Exclude OOPS videos from overall statistics
+                subset_videos = [v for v in test_dataset.video_list if 'OOPS' not in v]
+            else:
+                subset_videos = [v for v in test_dataset.video_list if subset in v]
+            
+            if len(subset_videos) == 0:
+                continue
+                
+            acc, edit, f1s = func_eval(
+                eval_label_dir, os.path.join(result_dir, 'prediction'), subset_videos)
+            
+            subset_results[subset] = {
+                'Acc': acc,
+                'Edit': edit,
+                'F1@10': f1s[0],
+                'F1@25': f1s[1],
+                'F1@50': f1s[2],
+                'num_videos': len(subset_videos)
+            }
 
-        result_dict = {
-            'Acc': acc,
-            'Edit': edit,
-            'F1@10': f1s[0],
-            'F1@25': f1s[1],
-            'F1@50': f1s[2]
-        }
+        # Store subset results for detailed printing
+        self._last_subset_results = subset_results
+        
+        # Return overall results for logging
+        result_dict = subset_results.get('all', {
+            'Acc': 0, 'Edit': 0, 'F1@10': 0, 'F1@25': 0, 'F1@50': 0
+        })
         
         return result_dict
 
@@ -326,6 +440,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--config', type=str)
     parser.add_argument('--device', type=int)
+    parser.add_argument('--test-only', action='store_true', help='Skip training and only run testing')
+    parser.add_argument('--model-path', type=str, help='Path to trained model file for testing')
     args = parser.parse_args()
 
     all_params = load_config_file(args.config)
@@ -337,21 +453,73 @@ if __name__ == '__main__':
     if args.device != -1:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(args.device)
     
-    feature_dir = os.path.join(root_data_dir, dataset_name, 'features')
-    label_dir = os.path.join(root_data_dir, dataset_name, 'groundTruth')
-    mapping_file = os.path.join(root_data_dir, dataset_name, 'mapping.txt')
+    # Omnifall-specific paths and labels
+    if dataset_name == 'omnifall':
+        label2idx = {
+            "walk": 0,
+            "fall": 1,
+            "fallen": 2,
+            "sit_down": 3,
+            "sitting": 4,
+            "lie_down": 5,
+            "lying": 6,
+            "stand_up": 7,
+            "standing": 8,
+            "other": 9,
+        }
+        idx2label = {v: k for k, v in label2idx.items()}
+        
+        # Override paths for omnifall
+        root_data_dir = "/pfs/work8/workspace/ffhk/scratch/kf3609-ws/data/omnifall"
+        feature_dir = root_data_dir  # Features are in subdirectories
+        label_dir = os.path.join(root_data_dir, "segmentation_annotations", "labels", "full.csv")
+        
+        # Create event_list from label2idx (DiffAct expects this format)
+        event_list = [idx2label[i] for i in range(len(label2idx))]
+        num_classes = len(event_list)
+    else:
+        # Original code for other datasets
+        feature_dir = os.path.join(root_data_dir, dataset_name, 'features')
+        label_dir = os.path.join(root_data_dir, dataset_name, 'groundTruth')
+        mapping_file = os.path.join(root_data_dir, dataset_name, 'mapping.txt')
+        
+        event_list = np.loadtxt(mapping_file, dtype=str)
+        event_list = [i[1] for i in event_list]
+        num_classes = len(event_list)
 
-    event_list = np.loadtxt(mapping_file, dtype=str)
-    event_list = [i[1] for i in event_list]
-    num_classes = len(event_list)
+    if dataset_name == 'omnifall':
+        # Load CSV splits for omnifall
+        import pandas as pd
+        train_df = pd.read_csv(os.path.join(root_data_dir, "segmentation_annotations", "splits", "train_cs.csv"))
+        test_df = pd.read_csv(os.path.join(root_data_dir, "segmentation_annotations", "splits", "test_cs.csv"))
+        
+        train_video_list = train_df.iloc[:, 0].tolist()
+        test_video_list = test_df.iloc[:, 0].tolist()
+        
+        # Check if OOPS videos are in training (they should only be in test)
+        oops_in_train = [v for v in train_video_list if 'OOPS' in v]
+        oops_in_test = [v for v in test_video_list if 'OOPS' in v]
+        
+        print(f"OOPS videos in training set: {len(oops_in_train)}")
+        print(f"OOPS videos in test set: {len(oops_in_test)}")
+        
+        if oops_in_train:
+            print("WARNING: OOPS videos found in training set:")
+            for v in oops_in_train[:5]:  # Show first 5
+                print(f"  - {v}")
+            if len(oops_in_train) > 5:
+                print(f"  ... and {len(oops_in_train) - 5} more")
+        else:
+            print("✓ OOPS videos are correctly excluded from training set")
+    else:
+        # Original bundle loading for other datasets
+        train_video_list = np.loadtxt(os.path.join(
+            root_data_dir, dataset_name, 'splits', f'train.split{split_id}.bundle'), dtype=str)
+        test_video_list = np.loadtxt(os.path.join(
+            root_data_dir, dataset_name, 'splits', f'test.split{split_id}.bundle'), dtype=str)
 
-    train_video_list = np.loadtxt(os.path.join(
-        root_data_dir, dataset_name, 'splits', f'train.split{split_id}.bundle'), dtype=str)
-    test_video_list = np.loadtxt(os.path.join(
-        root_data_dir, dataset_name, 'splits', f'test.split{split_id}.bundle'), dtype=str)
-
-    train_video_list = [i.split('.')[0] for i in train_video_list]
-    test_video_list = [i.split('.')[0] for i in test_video_list]
+        train_video_list = [i.split('.')[0] for i in train_video_list]
+        test_video_list = [i.split('.')[0] for i in test_video_list]
 
     train_data_dict = get_data_dict(
         feature_dir=feature_dir, 
@@ -385,9 +553,51 @@ if __name__ == '__main__':
     if not os.path.exists(result_dir):
         os.makedirs(result_dir)
 
-    trainer.train(train_train_dataset, train_test_dataset, test_test_dataset, 
-        loss_weights, class_weighting, soft_label,
-        num_epochs, batch_size, learning_rate, weight_decay,
-        label_dir=label_dir, result_dir=os.path.join(result_dir, naming), 
-        log_freq=log_freq, log_train_results=log_train_results
-    )
+    if args.test_only:
+        # Test-only mode: load model and run testing
+        if not args.model_path:
+            raise ValueError("--model-path is required when using --test-only")
+        
+        print(f"Running test-only mode with model: {args.model_path}")
+        test_result_dict = trainer.test(
+            test_test_dataset, 'decoder-agg', 
+            torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+            label_dir, result_dir=os.path.join(result_dir, naming), 
+            model_path=args.model_path
+        )
+        
+        # Print results like during training
+        print(f"\n=== Test Results ===")
+        print(f"{'Dataset':<12} {'F1@10':<6} {'F1@25':<6} {'F1@50':<6} {'Edit':<6} {'Acc':<6} {'Videos':<6}")
+        print('-' * 60)
+        
+        for subset_name, metrics in getattr(trainer, '_last_subset_results', {}).items():
+            if subset_name in ['all', 'OOPS']:
+                continue
+            print(f"{subset_name:<12} {metrics['F1@10']:<6.2f} {metrics['F1@25']:<6.2f} "
+                  f"{metrics['F1@50']:<6.2f} {metrics['Edit']:<6.2f} {metrics['Acc']:<6.2f} {metrics['num_videos']:<6}")
+        
+        # Overall results (excluding OOPS)
+        if 'all' in getattr(trainer, '_last_subset_results', {}):
+            all_metrics = trainer._last_subset_results['all']
+            print('-' * 60)
+            print(f"{'Overall':<12} {all_metrics['F1@10']:<6.2f} {all_metrics['F1@25']:<6.2f} "
+                  f"{all_metrics['F1@50']:<6.2f} {all_metrics['Edit']:<6.2f} {all_metrics['Acc']:<6.2f} {all_metrics['num_videos']:<6}")
+        
+        # OOPS-Fall results separately
+        if 'OOPS' in getattr(trainer, '_last_subset_results', {}):
+            oops_metrics = trainer._last_subset_results['OOPS']
+            print('-' * 60)
+            print(f"{'OOPS-Fall':<12} {oops_metrics['F1@10']:<6.2f} {oops_metrics['F1@25']:<6.2f} "
+                  f"{oops_metrics['F1@50']:<6.2f} {oops_metrics['Edit']:<6.2f} {oops_metrics['Acc']:<6.2f} {oops_metrics['num_videos']:<6}")
+        
+        print('=' * 60)
+        
+    else:
+        # Normal training mode
+        trainer.train(train_train_dataset, train_test_dataset, test_test_dataset, 
+            loss_weights, class_weighting, soft_label,
+            num_epochs, batch_size, learning_rate, weight_decay,
+            label_dir=label_dir, result_dir=os.path.join(result_dir, naming), 
+            log_freq=log_freq, log_train_results=log_train_results
+        )

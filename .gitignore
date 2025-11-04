@@ -1,8 +1,84 @@
-configs/*
-configs_backup/*
-datasets/*
-*.sh
-temp_log_dir/*
-result/*
-__pycache__/*
-.ipynb_checkpoints/*
+result
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyTorch
+*.pth
+*.pth.tar
+*.pt
+
+# Checkpoints and experiments
+ckpt/
+checkpoints/
+experiments/
+outputs/
+runs/
+
+# Data
+data/
+dataset/
+datasets/
+*.npy
+*.npz
+
+# Logs
+*.log
+logs/
+tensorboard/
+wandb/
+mlruns/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Documentation (temporary)
+CLAUDE.md
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# OS
+Thumbs.db

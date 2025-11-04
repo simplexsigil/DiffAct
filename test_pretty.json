@@ -1,0 +1,7 @@
+{
+    "test": "pretty print",
+    "nested": {
+        "key": "value",
+        "array": [1, 2, 3]
+    }
+}
